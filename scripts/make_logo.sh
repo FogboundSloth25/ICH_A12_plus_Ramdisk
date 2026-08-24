@@ -50,8 +50,6 @@ elif (($# >= 1)); then
     (($#)) && [[ -f "$1" || "$1" == *.png ]] && { PNG="$1"; shift; }
 fi
 
-# Build scripts pass board names from BuildManifest as uppercase DeviceClass
-# values (for example D321AP). devices.sh uses lowercase board keys.
 if [[ -n "$BOARD" ]]; then
     BOARD="$(printf '%s' "$BOARD" | tr '[:upper:]' '[:lower:]')"
 fi
@@ -124,7 +122,27 @@ if white < 100:
     raise SystemExit("logo mark has no visible white pixels — abort")
 PY
 
-"$IBOOTIM" "$FULL" "$RAW"
+# ibootim in this project is distributed as an x86_64 Darwin binary.
+# On Apple Silicon runners, force the Intel execution path and use an
+# x86_64 libpng when one has been prepared by CI.
+IBOOTIM_RUN=("$IBOOTIM")
+if [[ "$(uname -s)" == "Darwin" ]] && file "$IBOOTIM" 2>/dev/null | grep -q 'x86_64'; then
+    if command -v arch >/dev/null 2>&1; then
+        IBOOTIM_RUN=(arch -x86_64 "$IBOOTIM")
+    fi
+    if [[ -n "${X86_LIBPNG:-}" && -d "$X86_LIBPNG/lib" ]]; then
+        export DYLD_LIBRARY_PATH="$X86_LIBPNG/lib:${DYLD_LIBRARY_PATH:-}"
+    elif [[ -d /usr/local/opt/libpng/lib ]]; then
+        export DYLD_LIBRARY_PATH="/usr/local/opt/libpng/lib:${DYLD_LIBRARY_PATH:-}"
+    fi
+fi
+
+file "$IBOOTIM" 2>/dev/null || true
+if [[ -n "${DYLD_LIBRARY_PATH:-}" ]]; then
+    echo "ibootim DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH"
+fi
+
+"${IBOOTIM_RUN[@]}" "$FULL" "$RAW"
 "$IMG4" -i "$RAW" -o "$OUT" -A -T logo -M "$IM4M"
 
 if [[ -n "$OUT_DEST" ]]; then
