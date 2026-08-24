@@ -21,10 +21,10 @@ D321_EARLY_FALSE_POSITIVES = (0xE10, 0x10CC)
 NOP = bytes.fromhex("1f2003d5")
 MOV_X0_ZERO = bytes.fromhex("000080d2")
 
-# Leeksov iboot_patchfinder writes this slot (29 bytes incl. NUL).
-# Finalize replaces it with rd=md0 *without* trailing "%s" — the Jul 23
-# working XS iBoot had no %s; baking "%s" left a literal format token and
-# broke NAND bring-up (disk0 not configured / mount failures).
+# Older Leeksov versions patch this slot before finalize.
+# Some iOS 16.x A12 iBECs do not contain this exact literal, so absence
+# must not abort the build: boot.sh writes boot-args through iBoot's runtime
+# setenvnp/setenv interface immediately before bootx.
 LEEKSOV_BOOT_ARGS = b"serial=3 -v debug=0x2014e %s\x00"
 RAMDISK_BOOT_ARGS = b"rd=md0 -v debug=0x2014e\x00\x00\x00\x00\x00\x00"
 
@@ -133,19 +133,33 @@ def find_d321_image4_canary(stock: bytes) -> int:
 
 
 def apply_boot_args(data: bytearray) -> None:
+    # Already finalized.
     if data.count(RAMDISK_BOOT_ARGS) == 1:
         print("boot-args already set to ramdisk form")
         return
-    if len(LEEKSOV_BOOT_ARGS) != len(RAMDISK_BOOT_ARGS):
-        raise SystemExit("internal boot-args length mismatch")
-    if data.count(LEEKSOV_BOOT_ARGS) != 1:
-        raise SystemExit(
-            "expected exactly one Leeksov boot-args slot "
-            f"({LEEKSOV_BOOT_ARGS!r}); found {data.count(LEEKSOV_BOOT_ARGS)}"
+
+    # Normal Leeksov slot.
+    count = data.count(LEEKSOV_BOOT_ARGS)
+    if count == 1:
+        idx = data.index(LEEKSOV_BOOT_ARGS)
+        data[idx : idx + len(LEEKSOV_BOOT_ARGS)] = RAMDISK_BOOT_ARGS
+        print(f"boot-args → rd=md0 @ 0x{idx:X}")
+        return
+
+    # iOS 16.x A12 iBECs can legitimately omit the Leeksov format-string
+    # slot entirely. Do not manufacture an unsafe byte-offset patch here.
+    # boot.sh sets boot-args at runtime with setenvnp/setenv before bootx.
+    if count == 0:
+        print(
+            "warning: no Leeksov boot-args slot found; "
+            "leaving iBEC unchanged (runtime boot-args will be set before bootx)"
         )
-    idx = data.index(LEEKSOV_BOOT_ARGS)
-    data[idx : idx + len(LEEKSOV_BOOT_ARGS)] = RAMDISK_BOOT_ARGS
-    print(f"boot-args → rd=md0 @ 0x{idx:X}")
+        return
+
+    raise SystemExit(
+        "ambiguous Leeksov boot-args slots "
+        f"({LEEKSOV_BOOT_ARGS!r}); found {count}"
+    )
 
 
 def apply_n841_wrapper(stock: bytes, patched: bytearray) -> None:
