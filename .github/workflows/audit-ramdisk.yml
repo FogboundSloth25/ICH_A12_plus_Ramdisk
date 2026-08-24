@@ -1,4 +1,4 @@
-name: Audit iPhone XS A12 Ramdisk
+name: Audit iPhone XS Ramdisk
 
 on:
   workflow_dispatch:
@@ -14,11 +14,13 @@ jobs:
       IOS: 18.3
 
     steps:
-      - name: Checkout
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
 
       - name: Install dependencies
+        shell: bash
         run: |
           set -e
 
@@ -31,31 +33,34 @@ jobs:
             pkg-config
 
           python3 -m venv .venv
+
           source .venv/bin/activate
 
-          pip install --upgrade pip
-          pip install \
+          python -m pip install --upgrade pip
+
+          python -m pip install \
             pyimg4 \
-            biplist \
-            plistlib
+            biplist
 
 
-      - name: Setup ipsw tools
+      - name: Setup environment
+        shell: bash
         run: |
           set -e
 
           source .venv/bin/activate
 
-          pip install ipsw-parser || true
+          echo "$(pwd)/.venv/bin" >> "$GITHUB_PATH"
 
-          mkdir -p /tmp/buildmanifest
+          python --version
 
 
       - name: Download BuildManifest
+        shell: bash
         run: |
           set -e
 
-          source .venv/bin/activate
+          mkdir -p /tmp/buildmanifest
 
           cd /tmp/buildmanifest
 
@@ -64,101 +69,94 @@ jobs:
             --build "${BUILD}" \
             --output .
 
-
           test -f BuildManifest.plist
 
 
-      - name: Debug BuildManifest identities
+      - name: Print BuildManifest identities
+        shell: bash
         run: |
-          python3 <<'PY'
+          set -e
 
+          python3 <<'PY'
           import plistlib
 
-          with open("/tmp/buildmanifest/BuildManifest.plist","rb") as f:
-              data = plistlib.load(f)
+          path="/tmp/buildmanifest/BuildManifest.plist"
 
-          print("========== IDENTITIES ==========")
+          with open(path,"rb") as f:
+              data=plistlib.load(f)
 
-          for i,x in enumerate(data.get("BuildIdentities", [])):
-              info=x.get("Info",{})
+          print("========== BUILD IDENTITIES ==========")
+
+          for i,item in enumerate(data.get("BuildIdentities", [])):
+              info=item.get("Info", {})
 
               print(
-              f"""
-INDEX       : {i}
-ProductType : {info.get("ProductType")}
-DeviceClass : {info.get("DeviceClass")}
-BoardConfig : {info.get("BoardConfig")}
-BuildNumber : {info.get("BuildNumber")}
-Restore     : {info.get("RestoreBehavior")}
-"""
+                  "INDEX:", i,
+                  "ProductType:", info.get("ProductType"),
+                  "DeviceClass:", info.get("DeviceClass"),
+                  "BoardConfig:", info.get("BoardConfig"),
+                  "Build:", info.get("BuildNumber")
               )
 
           PY
 
 
-      - name: Patch BuildManifest matcher
+      - name: Verify target exists
+        shell: bash
         run: |
           set -e
 
           python3 <<'PY'
+          import plistlib
+          import sys
 
-          from pathlib import Path
-
-          p=Path("build.sh")
-
-          if not p.exists():
-              raise SystemExit("build.sh missing")
-
-          s=p.read_text()
+          with open("/tmp/buildmanifest/BuildManifest.plist","rb") as f:
+              data=plistlib.load(f)
 
 
-          old='''
-identity.get("DeviceClass","").lower() == board.lower()
-'''
+          found=False
+
+          for item in data.get("BuildIdentities", []):
+
+              info=item.get("Info",{})
+
+              if (
+                  info.get("ProductType") == "iPhone11,2"
+                  or info.get("BoardConfig") == "D321AP"
+                  or info.get("DeviceClass","").lower() == "d321ap"
+              ):
+                  found=True
+                  print("MATCH FOUND:")
+                  print(info)
+                  break
 
 
-          new='''
-(
-identity.get("DeviceClass","").lower() == board.lower()
-or
-identity.get("BoardConfig","").lower() == board.lower()
-or
-identity.get("ProductType","").lower() == device.lower()
-)
-'''
-
-
-          if old in s:
-              s=s.replace(old,new)
-              p.write_text(s)
-              print("patched BuildManifest matcher")
-
-          else:
-              print("matcher already patched or different")
-
+          if not found:
+              print("No matching identity")
+              sys.exit(1)
 
           PY
 
 
-      - name: Install python modules
+      - name: Install pyimg4 check
+        shell: bash
         run: |
-          python3 - <<'PY'
-
+          python3 <<'PY'
           import pyimg4
           print("pyimg4 OK")
-
           PY
 
 
       - name: Build ramdisk
+        shell: bash
         run: |
           set -e
 
           source .venv/bin/activate
 
-          echo "==============================="
-          echo " BUILDING RAMDISK "
-          echo "==============================="
+          echo "=============================="
+          echo " Building iPhone XS Ramdisk "
+          echo "=============================="
 
           echo "Device : ${DEVICE}"
           echo "Board  : ${BOARD}"
@@ -173,46 +171,44 @@ identity.get("ProductType","").lower() == device.lower()
             --with-fw
 
 
-      - name: Ramdisk forensic audit
+      - name: Ramdisk forensic
         if: always()
+        shell: bash
         run: |
+          set +e
+
           mkdir -p forensic
 
 
-          echo "===== FILES ====="
+          echo "=== FILE LIST ==="
 
           find . \
+          \( \
           -name "*.img4" \
           -o -name "*.bin" \
           -o -name "*.raw" \
-          > forensic/files.txt || true
+          \) \
+          > forensic/files.txt
 
 
+          echo "=== KERNEL FILES ==="
 
-          echo "===== ARCH ====="
-
-          uname -a > forensic/uname.txt
-          arch >> forensic/uname.txt
-
-
-
-          echo "===== IMG4 ====="
-
-          find bootchain -name "*.img4" \
+          find . \
+          -iname "*kernel*" \
           -exec file {} \; \
-          > forensic/img4.txt || true
+          > forensic/kernel.txt
 
 
+          echo "=== IMG4 FILES ==="
 
-          echo "===== KERNEL ====="
-
-          find . -name "*kernel*" \
+          find . \
+          -name "*.img4" \
           -exec file {} \; \
-          > forensic/kernel.txt || true
+          > forensic/img4.txt
 
 
 
-      - name: Upload forensic
+      - name: Upload forensic logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -224,6 +220,6 @@ identity.get("ProductType","").lower() == device.lower()
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: iphone-xs-ios18.3-ramdisk
+          name: iphone-xs-ios18.3-22D63
           path: |
             bootchain/
