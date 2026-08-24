@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Inspect or explicitly install Linux runtime prerequisites. It never builds IMG4.
+# Fedora/Linux runtime setup for an already-built ICH A12/A13 ramdisk.
+# Does not build IMG4 payloads.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+
 INSTALL=0
 INSTALL_UDEV=0
 
@@ -10,13 +12,11 @@ usage() {
     cat <<'EOF'
 usage: ./setup-linux.sh [--install] [--install-udev]
 
-Without options this is read-only: it detects Linux, tools, Python/PyUSB,
-libusb, libirecovery/irecovery, usbliter8ctl, and USB permission setup.
+  --install       install Fedora runtime packages and fetch usbliter8ctl
+  --install-udev install the supplied Apple USB udev rules
 
-  --install       explicitly install available runtime packages through pacman/apt
-  --install-udev  explicitly install the supplied least-privilege udev rules
-
-Neither option rebuilds an artifact or changes the iPhone.
+Normal runtime:
+  ./boot-linux.sh --debug --with-fw --logo
 EOF
 }
 
@@ -30,99 +30,96 @@ while (($#)); do
     shift
 done
 
-ok() { printf '  OK   %s\n' "$*"; }
-warn() { printf '  WARN %s\n' "$*"; }
-miss() { printf '  MISS %s\n' "$*"; MISSING=1; }
-MISSING=0
+[[ "$(uname -s)" == Linux ]] || { echo "This script is for Linux." >&2; exit 1; }
 
-[[ "$(uname -s)" == Linux ]] || { printf 'This setup script is for Linux only.\n' >&2; exit 1; }
-if [[ -r /etc/os-release ]]; then
-    # shellcheck disable=SC1091
-    source /etc/os-release
-fi
-DISTRO_ID="${ID:-unknown}"
+source /etc/os-release
 ARCH="$(uname -m)"
-printf '=== platform ===\n  distro: %s\n  architecture: %s\n' "$DISTRO_ID" "$ARCH"
+printf '=== ICH Linux runtime ===\ndistro=%s\narch=%s\n' "${ID:-unknown}" "$ARCH"
 
-case "$DISTRO_ID" in
-    arch|cachyos|endeavouros|manjaro)
-        MANAGER=pacman
-        # libirecovery is not consistently packaged in Arch's official repos.
-        # Install only known repository packages; report the official source path below.
-        PACKAGES=(libusb python-pyusb)
-        IRECOVERY_NOTE='Install libirecovery from its official source (or a trusted package) so irecovery is on PATH.'
-        ;;
-    debian|ubuntu|linuxmint|pop) MANAGER=apt; PACKAGES=(irecovery libusb-1.0-0 python3-usb) ;;
-    *) MANAGER=none; PACKAGES=() ;;
-esac
-
-printf '\n=== runtime tools ===\n'
-command -v bash >/dev/null && ok "bash $(bash --version | head -1)" || miss 'bash'
-command -v python3 >/dev/null && ok "$(python3 --version)" || miss 'python3'
-if command -v python3 >/dev/null && python3 -c 'import usb' >/dev/null 2>&1; then
-    ok 'PyUSB module'
-else
-    miss 'PyUSB module (python3 -m pip install --user pyusb, or use distro package)'
-fi
-if command -v irecovery >/dev/null; then
-    ok "irecovery: $(command -v irecovery)"
-else
-    miss 'irecovery (libirecovery CLI)'
-    [[ -z "${IRECOVERY_NOTE:-}" ]] || printf '  note: %s\n' "$IRECOVERY_NOTE"
-fi
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libusb-1.0; then
-    ok "libusb: $(pkg-config --modversion libusb-1.0)"
-else
-    warn 'libusb pkg-config metadata unavailable (runtime may still be installed)'
-fi
-
-USBLITER8CTL="${USBLITER8CTL:-}"
-if [[ -z "$USBLITER8CTL" ]]; then
-    for candidate in "$ROOT/../usbliter8ra1n/tools/usbliter8ctl" "$ROOT/tools/linux/usbliter8ctl"; do
-        [[ -f "$candidate" ]] && USBLITER8CTL="$candidate" && break
-    done
-fi
-if [[ -n "$USBLITER8CTL" && -x "$USBLITER8CTL" ]]; then
-    ok "usbliter8ctl: $USBLITER8CTL"
-else
-    miss 'usbliter8ctl (set USBLITER8CTL=/path/to/usbliter8ctl)'
-fi
-
-printf '\n=== USB permissions ===\n'
-if [[ -f /etc/udev/rules.d/39-ich-apple-recovery.rules ]]; then
-    ok 'ICH Apple DFU/Recovery udev rules installed'
-else
-    warn 'udev rules not installed; non-root USB access may fail'
-    printf '  fix: sudo install -Dm0644 %s /etc/udev/rules.d/39-ich-apple-recovery.rules\n' "$ROOT/udev/39-ich-apple-recovery.rules"
-    printf '       sudo udevadm control --reload-rules && sudo udevadm trigger\n'
+if [[ "${ID:-}" != fedora ]]; then
+    echo "This repo's automated installer currently targets Fedora." >&2
+    exit 1
 fi
 
 if ((INSTALL)); then
-    printf '\n=== explicit package installation ===\n'
-    case "$MANAGER" in
-        pacman)
-            sudo pacman -S --needed "${PACKAGES[@]}"
-            ;;
-        apt)
-            sudo apt-get update
-            sudo apt-get install -y "${PACKAGES[@]}"
-            ;;
-        *)
-            printf 'Unsupported package manager for %s. Install irecovery, libusb, and PyUSB manually.\n' "$DISTRO_ID" >&2
-            exit 1
-            ;;
-    esac
-fi
-if ((INSTALL_UDEV)); then
-    [[ -d /run/udev || -d /etc/udev ]] || { printf 'udev is not available on this system.\n' >&2; exit 1; }
-    sudo install -Dm0644 "$ROOT/udev/39-ich-apple-recovery.rules" /etc/udev/rules.d/39-ich-apple-recovery.rules
-    sudo udevadm control --reload-rules
-    sudo udevadm trigger
+    sudo dnf install -y \
+        libirecovery-utils \
+        libirecovery \
+        libusb1 \
+        python3 \
+        python3-pyusb \
+        usbutils \
+        perl \
+        git
 fi
 
-printf '\n=== result ===\n'
-if ((MISSING)); then
-    printf 'Runtime setup is incomplete. Re-run with --install for supported distro packages, then resolve any remaining MISS items.\n'
+command -v irecovery >/dev/null 2>&1 || {
+    echo "irecovery is missing. Run: ./setup-linux.sh --install" >&2
     exit 1
+}
+
+python3 -c 'import usb; print("PyUSB: OK")' || {
+    echo "PyUSB is missing. Run: ./setup-linux.sh --install" >&2
+    exit 1
+}
+
+if ((INSTALL_UDEV || INSTALL)); then
+    sudo install -Dm0644 "$ROOT/udev/99-ich-apple.rules" \
+        /etc/udev/rules.d/99-ich-apple.rules
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --subsystem-match=usb
 fi
-printf 'Runtime prerequisites are available. Next: ./boot.sh --validate && ./boot.sh --dry-run\n'
+
+# Locate a usable usbliter8ctl. The RP2350 firmware itself is separate; this is
+# the host-side Python controller for the PWND DFU handoff.
+USBLITER8CTL="${USBLITER8CTL:-}"
+for candidate in \
+    "$USBLITER8CTL" \
+    "$ROOT/tools/linux/usbliter8/usbliter8ctl" \
+    "$ROOT/../usbliter8ra1n/tools/usbliter8ctl" \
+    "$ROOT/../usbliter8/usbliter8ctl" \
+    "$HOME/usbliter8ra1n/tools/usbliter8ctl" \
+    "$HOME/usbliter8/usbliter8ctl"
+do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+        USBLITER8CTL="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$USBLITER8CTL" || ! -f "$USBLITER8CTL" ]]; then
+    if command -v git >/dev/null 2>&1; then
+        mkdir -p "$ROOT/tools/linux"
+        if [[ ! -d "$ROOT/tools/linux/usbliter8" ]]; then
+            git clone --depth 1 https://github.com/JoshAtticus/usbliter8.git \
+                "$ROOT/tools/linux/usbliter8"
+        fi
+        USBLITER8CTL="$ROOT/tools/linux/usbliter8/usbliter8ctl"
+    fi
+fi
+
+[[ -f "$USBLITER8CTL" ]] || {
+    echo "usbliter8ctl not found." >&2
+    echo "Set USBLITER8CTL=/absolute/path/to/usbliter8ctl and retry." >&2
+    exit 1
+}
+
+chmod +x "$USBLITER8CTL" 2>/dev/null || true
+
+printf '\n=== detected tools ===\n'
+printf 'irecovery:    %s\n' "$(command -v irecovery)"
+printf 'usbliter8ctl: %s\n' "$USBLITER8CTL"
+printf 'python3:      %s\n' "$(command -v python3)"
+printf 'USB devices:\n'
+lsusb -d 05ac: || true
+
+cat > "$ROOT/.linux-runtime" <<EOF
+IRECOVERY=$(command -v irecovery)
+USBLITER8CTL=$USBLITER8CTL
+ARCH=$ARCH
+EOF
+
+printf '\nSetup complete.\n'
+printf 'For normal use, do NOT use sudo after installing udev rules:\n\n'
+printf '  USBLITER8CTL="%s" ./boot-linux.sh --debug --with-fw --logo\n\n' "$USBLITER8CTL"
+printf 'First diagnostic:\n  ./boot-linux.sh --validate\n  ./boot-linux.sh --dry-run --debug\n'
