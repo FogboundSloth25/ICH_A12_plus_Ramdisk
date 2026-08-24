@@ -48,7 +48,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          set -e
+          set -euo pipefail
           brew untap aws/tap || true
           brew update
           brew install ipsw curl python@3 libpng
@@ -57,6 +57,43 @@ jobs:
           ipsw version || true
           python3 --version
           echo "LIBPNG_PREFIX=$(brew --prefix libpng)" >> "$GITHUB_ENV"
+
+      - name: Prepare x86_64 Homebrew for ibootim
+        run: |
+          set -euo pipefail
+
+          softwareupdate --install-rosetta --agree-to-license || true
+
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            if [[ ! -x /usr/local/bin/brew ]]; then
+              echo "Installing Intel Homebrew under Rosetta..."
+              NONINTERACTIVE=1 CI=1 arch -x86_64 /bin/bash -c \
+                "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
+
+            [[ -x /usr/local/bin/brew ]] || {
+              echo "ERROR: Intel Homebrew was not installed at /usr/local/bin/brew"
+              exit 1
+            }
+
+            arch -x86_64 /usr/local/bin/brew update
+            arch -x86_64 /usr/local/bin/brew install libpng
+
+            X86_BREW="$(arch -x86_64 /usr/local/bin/brew --prefix)"
+            X86_LIBPNG="$(arch -x86_64 /usr/local/bin/brew --prefix libpng)"
+          else
+            X86_BREW="$(brew --prefix)"
+            X86_LIBPNG="$(brew --prefix libpng)"
+          fi
+
+          echo "X86_BREW=$X86_BREW" >> "$GITHUB_ENV"
+          echo "X86_LIBPNG=$X86_LIBPNG" >> "$GITHUB_ENV"
+
+          echo "arm64 Homebrew: $(brew --prefix)"
+          echo "x86_64 Homebrew: $X86_BREW"
+          echo "x86_64 libpng:   $X86_LIBPNG"
+          file "$X86_LIBPNG/lib/libpng16.16.dylib"
+          file tools/darwin/ibootim
 
       - name: Setup Python venv
         run: |
@@ -98,7 +135,8 @@ jobs:
           for r in \
             resources/IM4M_0x8020 \
             resources/ssh.tar.gz \
-            resources/sshtarlist.txt
+            resources/sshtarlist.txt \
+            resources/ich_logo.png
           do
             [[ -f "$r" ]] || { echo "MISS: $r"; exit 1; }
             echo "OK: $r"
@@ -239,7 +277,7 @@ jobs:
           set -e
           source .venv/bin/activate
           export PATH="$(pwd)/.venv/bin:$PATH"
-          export DYLD_LIBRARY_PATH="$(brew --prefix libpng)/lib:${DYLD_LIBRARY_PATH:-}"
+          export DYLD_LIBRARY_PATH="$X86_LIBPNG/lib:${DYLD_LIBRARY_PATH:-}"
           echo "============================================"
           echo " Building iPhone XS ramdisk"
           echo "============================================"
@@ -250,8 +288,9 @@ jobs:
           echo "CPID        : 0x8020"
           echo "iOS         : 18.3"
           echo "Build       : ${{ github.event.inputs.ios_version }}"
-          echo "Kernel      : patched"
+          echo "Kernel      : ${{ github.event.inputs.kernel }}"
           echo "With FW     : ${{ github.event.inputs.with_fw }}"
+          echo "x86_64 libpng: $X86_LIBPNG"
           ARGS=(
             "--device" "iPhone11,2"
             "--build" "${{ github.event.inputs.ios_version }}"
