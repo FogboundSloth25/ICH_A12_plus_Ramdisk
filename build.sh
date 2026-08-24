@@ -143,7 +143,9 @@ if [[ -n "$BUILD_DEVICE" ]]; then
     MODE="DFU"
     PWND="usbliter8"
     ECID="build-only"
-    case "${BUILD_DEVICE,,}" in
+    # macOS runners use Bash 3.x by default; ${var,,} requires Bash 4+.
+    BUILD_DEVICE_LC="$(printf '%s' "$BUILD_DEVICE" | tr '[:upper:]' '[:lower:]')"
+    case "$BUILD_DEVICE_LC" in
         iphone12,1|n104ap|iphone11|"iphone 11")
             PRODUCT="iPhone12,1"; MODEL="N104AP"; CPID="0x8030"; NAME="iPhone 11" ;;
         iphone12,3|d421ap|iphone11pro|"iphone 11 pro")
@@ -238,7 +240,6 @@ CHIP="$(nr_chip_for_cpid "$CPID")"
 if [[ "$CHIP" == "A12X" ]]; then
     echo "warning: A12X (0x8027) — usbliter8 offsets TBD; proceed at your own risk" >&2
 fi
-
 
 API_JSON="$(curl --fail --silent --show-error --location \
     "https://api.ipsw.me/v4/device/$PRODUCT?type=ipsw")"
@@ -406,7 +407,6 @@ resolve_kpf_set() {
     if ((has_txm)) || [[ -n "$major" && "$major" -ge 27 ]]; then
         echo "ios27"
     elif [[ -n "$major" && "$major" -ge 17 ]]; then
-        # 17 / 18 / 26: same AMFI + PE_i_can_has_debugger finder path
         echo "ios18"
     else
         echo "ios18"
@@ -425,9 +425,9 @@ echo "  IPSW:     $IPSW_URL"
 echo "  kernel:   $KERNEL_MODE (kpf-set=$KPF_SET)"
 echo "  chain:    iBSS_in_ipsw=$HAS_IBSS use-ibss=$USE_IBSS SPTM=$HAS_SPTM TXM=$HAS_TXM with-fw=$WITH_FW"
 if ((HAS_SPTM || HAS_TXM)); then
-    echo "  note:     SPTM/TXM present in Manifest → will patch (typical iOS 27-class on A12/A13)"
+    echo "  note:     SPTM/TXM present in Manifest → will patch"
 else
-    echo "  note:     no SPTM/TXM in Manifest (typical iOS 17/18/26 on A12/A13) — skip those layers"
+    echo "  note:     no SPTM/TXM in Manifest — skip those layers"
 fi
 echo "  patches:  iBoot always; kernel=$KERNEL_MODE/$KPF_SET (Leeksov)"
 
@@ -491,12 +491,10 @@ if ((WITH_FW)); then
         }
         fetch_member "$(manifest_path "$key")" >/dev/null
     done
-    # PMP is A13-only; do not fail the build on A12.
     if [[ -n "$(manifest_path PMP)" ]]; then
         fetch_member "$(manifest_path PMP)" >/dev/null
     fi
 fi
-# Always stage RestoreSEP when present — boot.sh loads it via rsepfirmware.
 if [[ -n "$(manifest_path RestoreSEP)" ]]; then
     fetch_member "$(manifest_path RestoreSEP)" >/dev/null
 elif ((LIVE_DATA)); then
@@ -531,12 +529,10 @@ ipsw img4 im4p extract -o "$WORK/iBEC.raw" "$WORK/iBEC.im4p"
 ipsw img4 im4p extract -o "$WORK/kernelcache.raw" "$WORK/KernelCache.im4p"
 "$IMG4" -i "$WORK/RestoreRamDisk.im4p" -o "$WORK/ramdisk.dmg"
 
-# --- iBoot (Leeksov + board finalize, boot-args rd=md0) ---
 if ((USE_IBSS)); then
     ipsw img4 im4p extract -o "$WORK/iBSS.raw" "$WORK/iBSS.im4p"
     python3 "$NR_PATCH/iboot_patchfinder.py" \
         "$WORK/iBSS.raw" "$OUT/iBSS.patched.raw" --mode ibss
-    # Same board finalize as iBEC when Leeksov slots exist (harmless no-op otherwise).
     python3 "$NR_PATCH/finalize_iboot.py" \
         --stock "$WORK/iBSS.raw" \
         --input "$OUT/iBSS.patched.raw" \
@@ -554,14 +550,12 @@ python3 "$NR_PATCH/finalize_iboot.py" \
     --output "$OUT/iBoot.patched.bin" \
     --board "$MODEL"
 
-# Typed IMG4 for Recovery-stage iBEC handoff after usbliter8ctl boots iBSS.
 if ((USE_IBSS)); then
     "$IMG4" -i "$OUT/iBoot.patched.bin" -o "$BOOTCHAIN/iBEC.patched.img4" \
         -A -T ibec -M "$IM4M"
     echo "wrapped iBEC.patched.img4 for iBSS→iBEC handoff"
 fi
 
-# SPTM/TXM only when the IPSW ships them (README: iOS 27-class on A12/A13).
 if ((HAS_SPTM)); then
     ipsw img4 im4p extract -o "$WORK/SPTM.raw" "$WORK/SPTM.im4p"
     python3 "$NR_PATCH/sptm_patchfinder.py" "$WORK/SPTM.raw" "$OUT/SPTM.patched.raw"
@@ -576,15 +570,12 @@ if ((HAS_TXM)); then
     echo "patched TXM"
 fi
 
-# --- Expand stock RestoreRamDisk, inject SSH (method A/B) ---
 trap 'hdiutil detach -force /tmp/NewRamdiskRD >/dev/null 2>&1 || true' EXIT
-# Inject ssh.tar.gz (includes mount_ich). On device after SSH: mount_ich
 nr_expand_inject_ramdisk \
     "$WORK/ramdisk.dmg" \
     "$NR_RESOURCES/ssh.tar.gz" \
     /tmp/NewRamdiskRD \
     "$GTAR"
-# Ensure ICH-branded restored_external (replaces SSHRD_Script splash/tag).
 if [[ -f "$NR_RESOURCES/restored_external" ]]; then
     hdiutil attach -mountpoint /tmp/NewRamdiskRD -owners off \
         -imagekey diskimage-class=CRawDiskImage "$WORK/ramdisk.dmg" >/dev/null
@@ -596,7 +587,6 @@ if [[ -f "$NR_RESOURCES/restored_external" ]]; then
         fi
         echo "installed ICH-branded restored_external (no SSHRD splash)"
     fi
-    # Ensure dropbear host key permissions are 0600
     for keyfile in /tmp/NewRamdiskRD/private/etc/dropbear/dropbear_*_host_key; do
         if [[ -f "$keyfile" ]]; then
             chmod 600 "$keyfile"
@@ -606,25 +596,19 @@ if [[ -f "$NR_RESOURCES/restored_external" ]]; then
 fi
 trap - EXIT
 
-# Validate SSH setup inside ramdisk.dmg
 nr_validate_ramdisk_ssh "$WORK/ramdisk.dmg" /tmp/NewRamdiskRDVal
 
-
-# Trustcache: stock RestoreTrustCache + append injected SSH CDHashes.
-# sshtarlist.txt paths are relative to project root: work/sshtar/...
 "$IMG4" -i "$WORK/RestoreTrustCache.im4p" -o "$NR_WORK/trustcache.bin"
 rm -rf "$NR_WORK/sshtar"
 mkdir -p "$NR_WORK/sshtar"
 "$GTAR" -x --no-overwrite-dir -f "$NR_RESOURCES/ssh.tar.gz" -C "$NR_WORK/sshtar"
 (
     cd "$ROOT"
-    # shellcheck disable=SC2046
     "$TC" append work/trustcache.bin $(<"resources/sshtarlist.txt")
 )
 cp "$NR_WORK/trustcache.bin" "$WORK/trustcache.bin"
 echo "built trustcache via RestoreTrustCache + append"
 
-# IMG4 + IM4M packaging (proven path for irecovery/bootx on A12).
 "$IMG4" -i "$WORK/trustcache.bin" -o "$BOOTCHAIN/trustcache.img4" -A -T rtsc -M "$IM4M"
 "$IMG4" -i "$WORK/ramdisk.dmg" -o "$BOOTCHAIN/ramdisk.img4" -A -T rdsk -M "$IM4M"
 "$IMG4" -i "$WORK/DeviceTree.im4p" -o "$BOOTCHAIN/devicetree.img4" -T rdtr -M "$IM4M"
@@ -700,7 +684,6 @@ if ((LIVE_DATA)); then
     printf '%s\n' '1' > "$BOOTCHAIN/live-data.enabled"
 fi
 
-# Device-specific signed boot logo for this board / panel → bootchain/logo.img4
 echo "Building ICH logo for $MODEL (cpid=$CPID) → $BOOTCHAIN/logo.img4"
 if NR_CPID="$CPID" "$ROOT/scripts/make_logo.sh" "$MODEL" --out "$BOOTCHAIN/logo.img4"; then
     echo "staged logo.img4 ($(wc -c <"$BOOTCHAIN/logo.img4") bytes)"
@@ -723,7 +706,6 @@ else
 fi
 "${PREFLIGHT[@]}"
 
-# Drop scratch after a successful build (keep bootchain/ only).
 rm -rf "$WORK" "$OUT" "$NR_WORK" "$CACHE" "$NR_CACHE"
 echo "cleaned work/ and cache/"
 
