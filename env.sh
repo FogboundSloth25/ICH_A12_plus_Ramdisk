@@ -21,8 +21,17 @@ export NR_CACHE="$ROOT/cache"
 export NR_WORK="$ROOT/work"
 export NR_BOOTCHAIN_ROOT="$ROOT/bootchain"
 
+# Keep the active Python virtual environment ahead of system Python.
+# This is important for CI because wrap_kernel() imports pyimg4.
+PY_VENV_BIN=""
+if [[ -n "${VIRTUAL_ENV:-}" && -d "$VIRTUAL_ENV/bin" ]]; then
+    PY_VENV_BIN="$VIRTUAL_ENV/bin:"
+elif [[ -n "${VENV_PYTHON:-}" && -x "${VENV_PYTHON}" ]]; then
+    PY_VENV_BIN="$(dirname "$VENV_PYTHON")/:"
+fi
+
 # Keep both Fedora system tools and repo tools available.
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$NR_TOOLS${PATH:+:$PATH}"
+export PATH="${PY_VENV_BIN}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$NR_TOOLS${PATH:+:$PATH}"
 
 # shellcheck source=scripts/banner.sh
 source "$ROOT/scripts/banner.sh"
