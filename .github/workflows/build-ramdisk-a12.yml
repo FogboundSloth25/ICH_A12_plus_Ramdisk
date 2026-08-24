@@ -25,7 +25,7 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -146,6 +146,70 @@ jobs:
           PY
           diff -u env.sh.bak env.sh || true
 
+      - name: Validate iOS 18.3 BuildManifest remotely
+        run: |
+          set -e
+          source .venv/bin/activate
+
+          BUILD="${{ github.event.inputs.ios_version }}"
+          [[ "$BUILD" == "22D63" ]] || {
+            echo "ERROR: This workflow targets iOS 18.3 / 22D63 only."
+            exit 1
+          }
+
+          WORKDIR="/tmp/buildmanifest"
+          rm -rf "$WORKDIR"
+          mkdir -p "$WORKDIR"
+          cd "$WORKDIR"
+
+          URLS="$(ipsw download ipsw --device iPhone11,2 --build "$BUILD" --urls 2>&1)"
+          echo "$URLS"
+
+          IPSW_URL="$(printf '%s\n' "$URLS" | grep -Eo 'https?://[^[:space:]]+\.ipsw' | head -1)"
+          [[ -n "$IPSW_URL" ]] || {
+            echo "ERROR: Could not resolve IPSW URL for iPhone11,2 / $BUILD"
+            exit 1
+          }
+          echo "Resolved IPSW: $IPSW_URL"
+
+          ipsw extract --remote "$IPSW_URL" --pattern '^BuildManifest\.plist$' --output .
+
+          MANIFEST="$(find . -name BuildManifest.plist -type f | head -1)"
+          [[ -n "$MANIFEST" && -f "$MANIFEST" ]] || {
+            echo "ERROR: BuildManifest.plist was not extracted"
+            exit 1
+          }
+
+          python3 <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          files = list(Path('.').rglob('BuildManifest.plist'))
+          if not files:
+              raise SystemExit("No BuildManifest.plist found")
+
+          data = plistlib.loads(files[0].read_bytes())
+          found = False
+          for i, identity in enumerate(data.get('BuildIdentities', [])):
+              info = identity.get('Info', {})
+              print(
+                  f"Index {i}: DeviceClass={info.get('DeviceClass', 'N/A')} "
+                  f"ProductType={info.get('ProductType', 'N/A')} "
+                  f"BoardConfig={info.get('BoardConfig', 'N/A')} "
+                  f"BuildNumber={info.get('BuildNumber', 'N/A')} "
+                  f"RestoreBehavior={info.get('RestoreBehavior', 'N/A')}"
+              )
+              if (
+                  info.get('DeviceClass', '').lower() == 'd321ap'
+                  and info.get('BuildNumber') == '22D63'
+              ):
+                  found = True
+
+          if not found:
+              raise SystemExit('No D321AP / 22D63 BuildIdentity found')
+          print('OK: D321AP / 22D63 BuildIdentity found')
+          PY
+
       - name: Replace irecovery with iPhone XS CI shim
         run: |
           set -e
@@ -170,39 +234,6 @@ jobs:
           chmod +x tools/darwin/irecovery
           tools/darwin/irecovery -q
 
-      - name: Inspect iOS 18.3 BuildManifest
-        run: |
-          set -e
-          source .venv/bin/activate
-          mkdir -p /tmp/buildmanifest
-          cd /tmp/buildmanifest
-          ipsw download ipsw \
-            --device iPhone11,2 \
-            --build "${{ github.event.inputs.ios_version }}" \
-            --build-manifest \
-            --output .
-          [[ -f BuildManifest.plist ]] || { echo "ERROR: BuildManifest.plist was not downloaded"; exit 1; }
-          python3 <<'PY'
-          import plistlib
-          from pathlib import Path
-          data = plistlib.loads(Path("BuildManifest.plist").read_bytes())
-          found = False
-          for i, identity in enumerate(data.get("BuildIdentities", [])):
-              info = identity.get("Info", {})
-              print(
-                  f"Index {i}: "
-                  f"DeviceClass={info.get('DeviceClass', 'N/A')} "
-                  f"ProductType={info.get('ProductType', 'N/A')} "
-                  f"BoardConfig={info.get('BoardConfig', 'N/A')} "
-                  f"BuildNumber={info.get('BuildNumber', 'N/A')} "
-                  f"RestoreBehavior={info.get('RestoreBehavior', 'N/A')}"
-              )
-              if info.get("DeviceClass", "").lower() == "d321ap" and info.get("BuildNumber") == "22D63":
-                  found = True
-          raise SystemExit(0 if found else "No D321AP / 22D63 BuildIdentity found")
-          PY
-          cd -
-
       - name: Build iPhone XS A12 ramdisk
         run: |
           set -e
@@ -219,7 +250,7 @@ jobs:
           echo "CPID        : 0x8020"
           echo "iOS         : 18.3"
           echo "Build       : ${{ github.event.inputs.ios_version }}"
-          echo "Kernel      : ${{ github.event.inputs.kernel }}"
+          echo "Kernel      : patched"
           echo "With FW     : ${{ github.event.inputs.with_fw }}"
           ARGS=(
             "--device" "iPhone11,2"
