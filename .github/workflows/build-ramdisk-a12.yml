@@ -1,4 +1,3 @@
-```yaml
 name: Build iPhone XS A12 Ramdisk
 
 on:
@@ -9,7 +8,6 @@ on:
         required: true
         default: "20F75"
         type: string
-
       kernel:
         description: "Kernel patch mode"
         required: true
@@ -18,7 +16,6 @@ on:
         options:
           - patched
           - stock
-
       with_fw:
         description: "Include coprocessor firmware"
         required: true
@@ -31,35 +28,17 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ------------------------------------------------------------
-      # Environment
-      # ------------------------------------------------------------
 
       - name: Show environment
         run: |
           set -e
-
           echo "============================================"
           echo " iPhone XS / iPhone11,2 Ramdisk Builder"
           echo "============================================"
-
-          echo
-          echo "=== macOS ==="
           sw_vers
-
-          echo
-          echo "=== Architecture ==="
           uname -m
-
-          echo
-          echo "=== Target ==="
           echo "ProductType : iPhone11,2"
           echo "Device      : iPhone XS"
           echo "BoardConfig : D321AP"
@@ -67,79 +46,38 @@ jobs:
           echo "CPID        : 0x8020"
           echo "iOS         : ${{ github.event.inputs.ios_version }}"
 
-      # ------------------------------------------------------------
-      # Dependencies
-      # ------------------------------------------------------------
-
       - name: Install system dependencies
         run: |
           set -e
-
           brew update
-
-          brew install \
-            ipsw \
-            curl \
-            python@3
-
+          brew install ipsw curl python@3
           which ipsw
           which python3
-
-          echo
-          echo "ipsw:"
           ipsw version || true
-
-          echo
-          echo "python:"
           python3 --version
-
-      # ------------------------------------------------------------
-      # Python virtual environment
-      # ------------------------------------------------------------
 
       - name: Setup Python venv
         run: |
           set -e
-
           python3 -m venv .venv
-
           source .venv/bin/activate
-
           python -m pip install --upgrade pip
-
           if [[ -f requirements.txt ]]; then
-            echo "Installing requirements.txt"
             python -m pip install -r requirements.txt
           else
-            echo "requirements.txt not found"
-            echo "Installing required packages manually"
-
-            python -m pip install \
-              pyimg4 \
-              capstone \
-              pillow
+            python -m pip install pyimg4 capstone pillow
           fi
-
           python - <<'PY'
           import pyimg4
           import capstone
-
           print("OK: pyimg4")
           print("OK: capstone")
           PY
-
           echo "VENV_PYTHON=$(pwd)/.venv/bin/python" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # Verify repository
-      # ------------------------------------------------------------
 
       - name: Verify repository structure
         run: |
           set -e
-
-          echo "=== Required source files ==="
-
           for f in \
             build.sh \
             env.sh \
@@ -150,139 +88,66 @@ jobs:
             patch/finalize_iboot.py \
             patch/preflight.py
           do
-            if [[ ! -f "$f" ]]; then
-              echo "MISS: $f"
-              exit 1
-            fi
-
+            [[ -f "$f" ]] || { echo "MISS: $f"; exit 1; }
             echo "OK: $f"
           done
-
-          echo
-          echo "=== Required resources ==="
-
           for r in \
             resources/IM4M_0x8020 \
             resources/ssh.tar.gz \
             resources/sshtarlist.txt
           do
-            if [[ ! -f "$r" ]]; then
-              echo "MISS: $r"
-              exit 1
-            fi
-
+            [[ -f "$r" ]] || { echo "MISS: $r"; exit 1; }
             echo "OK: $r"
           done
-
-          echo
-          echo "=== Darwin tools ==="
-
           chmod +x tools/darwin/*
-
-          for t in \
-            pzb \
-            img4 \
-            gtar \
-            trustcache \
-            jq
-          do
-            if [[ ! -x "tools/darwin/$t" ]]; then
-              echo "MISS: tools/darwin/$t"
-              exit 1
-            fi
-
+          for t in pzb img4 gtar trustcache jq; do
+            [[ -x "tools/darwin/$t" ]] || { echo "MISS: tools/darwin/$t"; exit 1; }
             echo "OK: $t"
           done
-
-          echo
-          echo "=== irecovery ==="
-
-          if [[ ! -x tools/darwin/irecovery ]]; then
-            echo "MISS: tools/darwin/irecovery"
-            exit 1
-          fi
-
-      # ------------------------------------------------------------
-      # Patch build.sh DeviceClass matching
-      # ------------------------------------------------------------
+          [[ -x tools/darwin/irecovery ]] || { echo "MISS: tools/darwin/irecovery"; exit 1; }
 
       - name: Patch build.sh DeviceClass matching
         run: |
           set -e
-
           cp build.sh build.sh.bak
-
           python3 <<'PY'
           from pathlib import Path
-
           p = Path("build.sh")
           content = p.read_text()
-
           orig = 'if item.get("Info", {}).get("DeviceClass") == board'
           repl = 'if item.get("Info", {}).get("DeviceClass", "").lower() == board.lower()'
-
           if orig in content:
-              content = content.replace(orig, repl)
-              p.write_text(content)
+              p.write_text(content.replace(orig, repl))
               print("Patched DeviceClass comparison")
           else:
-              print("DeviceClass pattern not found")
-              print("Repository may already contain the patch")
+              print("DeviceClass pattern not found; leaving build.sh unchanged")
           PY
-
           diff -u build.sh.bak build.sh || true
-
-      # ------------------------------------------------------------
-      # Make build.sh use CI Python
-      # ------------------------------------------------------------
 
       - name: Patch env.sh for CI Python
         run: |
           set -e
-
           cp env.sh env.sh.bak
-
           python3 <<'PY'
           from pathlib import Path
-
           p = Path("env.sh")
           content = p.read_text()
-
-          orig = (
-              'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:'
-              '/opt/homebrew/bin:/usr/local/bin:$NR_TOOLS${PATH:+:$PATH}"'
-          )
-
-          repl = (
-              'export PATH="${VIRTUAL_ENV:+$VIRTUAL_ENV/bin:}'
-              '/usr/bin:/bin:/usr/sbin:/sbin:'
-              '/opt/homebrew/bin:/usr/local/bin:'
-              '$NR_TOOLS${PATH:+:$PATH}"'
-          )
-
+          orig = 'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$NR_TOOLS${PATH:+:$PATH}"'
+          repl = 'export PATH="${VIRTUAL_ENV:+$VIRTUAL_ENV/bin:}/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$NR_TOOLS${PATH:+:$PATH}"'
           if orig in content:
-              content = content.replace(orig, repl)
-              p.write_text(content)
+              p.write_text(content.replace(orig, repl))
               print("env.sh patched")
           else:
-              print("env.sh PATH pattern not found")
+              print("env.sh PATH pattern not found; leaving env.sh unchanged")
           PY
-
           diff -u env.sh.bak env.sh || true
-
-      # ------------------------------------------------------------
-      # Replace irecovery with CI shim
-      # ------------------------------------------------------------
 
       - name: Replace irecovery with iPhone XS CI shim
         run: |
           set -e
-
           mv tools/darwin/irecovery tools/darwin/irecovery.stock
-
           cat > tools/darwin/irecovery <<'SHIM'
           #!/bin/bash
-
           if [[ "$1" == "-q" ]]; then
             cat <<'INNER'
           PRODUCT: iPhone11,2
@@ -295,60 +160,30 @@ jobs:
           INNER
             exit 0
           fi
-
           echo "irecovery CI shim: unsupported arguments: $*" >&2
           exit 1
           SHIM
-
           chmod +x tools/darwin/irecovery
-
-          echo
-          echo "=== CI device ==="
-
           tools/darwin/irecovery -q
-
-      # ------------------------------------------------------------
-      # Resolve firmware
-      # ------------------------------------------------------------
 
       - name: Inspect iOS 16.5.1 BuildManifest
         run: |
           set +e
-
           source .venv/bin/activate
-
           mkdir -p /tmp/buildmanifest
           cd /tmp/buildmanifest
-
-          echo "Downloading BuildManifest..."
-
           ipsw download ipsw \
             --device iPhone11,2 \
             --build "${{ github.event.inputs.ios_version }}" \
             --build-manifest \
             --output .
-
-          if [[ ! -f BuildManifest.plist ]]; then
-            echo "WARNING: BuildManifest.plist was not downloaded"
-            exit 0
-          fi
-
-          echo
-          echo "=== BUILD IDENTITIES ==="
-
-          python3 <<'PY'
+          if [[ -f BuildManifest.plist ]]; then
+            python3 <<'PY'
           import plistlib
           from pathlib import Path
-
-          data = plistlib.loads(
-              Path("BuildManifest.plist").read_bytes()
-          )
-
-          for i, identity in enumerate(
-              data.get("BuildIdentities", [])
-          ):
+          data = plistlib.loads(Path("BuildManifest.plist").read_bytes())
+          for i, identity in enumerate(data.get("BuildIdentities", [])):
               info = identity.get("Info", {})
-
               print(
                   f"Index {i}: "
                   f"DeviceClass={info.get('DeviceClass', 'N/A')} "
@@ -358,27 +193,19 @@ jobs:
                   f"RestoreBehavior={info.get('RestoreBehavior', 'N/A')}"
               )
           PY
-
+          else
+            echo "WARNING: BuildManifest.plist was not downloaded"
+          fi
           cd -
-
-      # ------------------------------------------------------------
-      # Build ramdisk
-      # ------------------------------------------------------------
 
       - name: Build iPhone XS A12 ramdisk
         run: |
           set -e
-
           source .venv/bin/activate
-
           export PATH="$(pwd)/.venv/bin:$PATH"
-
-          echo
           echo "============================================"
           echo " Building iPhone XS ramdisk"
           echo "============================================"
-
-          echo
           echo "Device      : iPhone XS"
           echo "ProductType : iPhone11,2"
           echo "BoardConfig : D321AP"
@@ -387,134 +214,45 @@ jobs:
           echo "Build       : ${{ github.event.inputs.ios_version }}"
           echo "Kernel      : ${{ github.event.inputs.kernel }}"
           echo "With FW     : ${{ github.event.inputs.with_fw }}"
-          echo
-
           ARGS=(
-            "--device"
-            "iPhone11,2"
-            "--build"
-            "${{ github.event.inputs.ios_version }}"
-            "--kernel"
-            "${{ github.event.inputs.kernel }}"
+            "--device" "iPhone11,2"
+            "--build" "${{ github.event.inputs.ios_version }}"
+            "--kernel" "${{ github.event.inputs.kernel }}"
           )
-
           if [[ "${{ github.event.inputs.with_fw }}" == "true" ]]; then
             ARGS+=("--with-fw")
           else
             ARGS+=("--no-fw")
           fi
-
-          echo "Running:"
-          printf ' %q' ./build.sh "${ARGS[@]}"
-          echo
-
           ./build.sh "${ARGS[@]}"
-
-      # ------------------------------------------------------------
-      # Inspect resulting bootchain
-      # ------------------------------------------------------------
 
       - name: Inspect bootchain
         run: |
           set -e
-
-          echo
-          echo "=== Bootchain directories ==="
-
-          find bootchain \
-            -maxdepth 2 \
-            -type f \
-            -print
-
-          echo
-          echo "=== Sizes ==="
-
+          find bootchain -maxdepth 2 -type f -print
           du -ah bootchain
-
-          echo
-          echo "=== chain.info ==="
-
-          find bootchain \
-            -name chain.info \
-            -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \; \
-            || true
-
-      # ------------------------------------------------------------
-      # Verify expected A12 artifacts
-      # ------------------------------------------------------------
+          find bootchain -name chain.info -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \; || true
 
       - name: Verify A12 bootchain
         run: |
           set -e
-
-          BOOTCHAIN_DIR="$(
-            find bootchain \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -type d \
-              | head -1
-          )"
-
-          if [[ -z "$BOOTCHAIN_DIR" ]]; then
-            echo "ERROR: bootchain directory not found"
-            exit 1
-          fi
-
-          echo "Bootchain: $BOOTCHAIN_DIR"
-
-          REQUIRED=(
-            "devicetree.img4"
-            "trustcache.img4"
-            "ramdisk.img4"
-            "kernelcache.img4"
-          )
-
-          for f in "${REQUIRED[@]}"; do
-            if [[ ! -f "$BOOTCHAIN_DIR/$f" ]]; then
-              echo "MISSING: $f"
-              exit 1
-            fi
-
+          BOOTCHAIN_DIR="$(find bootchain -mindepth 1 -maxdepth 1 -type d | head -1)"
+          [[ -n "$BOOTCHAIN_DIR" ]] || { echo "ERROR: bootchain directory not found"; exit 1; }
+          for f in devicetree.img4 trustcache.img4 ramdisk.img4 kernelcache.img4; do
+            [[ -f "$BOOTCHAIN_DIR/$f" ]] || { echo "MISSING: $f"; exit 1; }
             echo "OK: $f"
           done
-
-          if [[ ! -f "$BOOTCHAIN_DIR/iBoot.patched.bin" ]]; then
-            echo "WARNING: iBoot.patched.bin is absent"
-          else
-            echo "OK: iBoot.patched.bin"
-          fi
-
-      # ------------------------------------------------------------
-      # Package
-      # ------------------------------------------------------------
+          [[ -f "$BOOTCHAIN_DIR/iBoot.patched.bin" ]] && echo "OK: iBoot.patched.bin" || echo "WARNING: iBoot.patched.bin is absent"
 
       - name: Package artifact
         run: |
           set -e
-
-          BOOTCHAIN_DIR="$(
-            find bootchain \
-              -mindepth 1 \
-              -maxdepth 1 \
-              -type d \
-              | head -1
-          )"
-
-          if [[ -z "$BOOTCHAIN_DIR" ]]; then
-            echo "ERROR: No bootchain directory found"
-            exit 1
-          fi
-
+          BOOTCHAIN_DIR="$(find bootchain -mindepth 1 -maxdepth 1 -type d | head -1)"
+          [[ -n "$BOOTCHAIN_DIR" ]] || { echo "ERROR: No bootchain directory found"; exit 1; }
           BUILD_NAME="$(basename "$BOOTCHAIN_DIR")"
-
           echo "BOOTCHAIN_NAME=$BUILD_NAME" >> "$GITHUB_ENV"
-
           mkdir -p artifact/bootchain
-
-          cp -R \
-            "$BOOTCHAIN_DIR"/* \
-            artifact/bootchain/
-
+          cp -R "$BOOTCHAIN_DIR"/* artifact/bootchain/
           cat > artifact/BUILD-INFO.txt <<EOF
           Device: iPhone XS
           ProductType: iPhone11,2
@@ -529,69 +267,24 @@ jobs:
           Repository: ${{ github.repository }}
           Commit: ${{ github.sha }}
           EOF
-
-          echo "${{ github.sha }}" \
-            > artifact/source-commit.txt
-
-          tar -czf \
-            iphone-xs-a12-ramdisk.tar.gz \
-            -C artifact .
-
-          echo
-          echo "=== Artifact ==="
-
+          echo "${{ github.sha }}" > artifact/source-commit.txt
+          tar -czf iphone-xs-a12-ramdisk.tar.gz -C artifact .
           find artifact -type f
-
-          echo
-          du -ah \
-            artifact \
-            iphone-xs-a12-ramdisk.tar.gz
-
-      # ------------------------------------------------------------
-      # Upload
-      # ------------------------------------------------------------
+          du -ah artifact iphone-xs-a12-ramdisk.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: iphone-xs-a12-ramdisk-${{ github.event.inputs.ios_version }}
-
           path: |
             artifact/
             iphone-xs-a12-ramdisk.tar.gz
-
           if-no-files-found: error
-
-      # ------------------------------------------------------------
-      # Restore modified repository files
-      # ------------------------------------------------------------
 
       - name: Restore original files
         if: always()
         run: |
           set +e
-
-          if [[ -f tools/darwin/irecovery.stock ]]; then
-            mv -f \
-              tools/darwin/irecovery.stock \
-              tools/darwin/irecovery
-
-            echo "Restored irecovery"
-          fi
-
-          if [[ -f build.sh.bak ]]; then
-            mv -f \
-              build.sh.bak \
-              build.sh
-
-            echo "Restored build.sh"
-          fi
-
-          if [[ -f env.sh.bak ]]; then
-            mv -f \
-              env.sh.bak \
-              env.sh
-
-            echo "Restored env.sh"
-          fi
-```
+          [[ -f tools/darwin/irecovery.stock ]] && mv -f tools/darwin/irecovery.stock tools/darwin/irecovery
+          [[ -f build.sh.bak ]] && mv -f build.sh.bak build.sh
+          [[ -f env.sh.bak ]] && mv -f env.sh.bak env.sh
