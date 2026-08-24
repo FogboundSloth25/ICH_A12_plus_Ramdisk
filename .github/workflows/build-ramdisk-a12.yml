@@ -49,12 +49,14 @@ jobs:
       - name: Install system dependencies
         run: |
           set -e
+          brew untap aws/tap || true
           brew update
-          brew install ipsw curl python@3
+          brew install ipsw curl python@3 libpng
           which ipsw
           which python3
           ipsw version || true
           python3 --version
+          echo "LIBPNG_PREFIX=$(brew --prefix libpng)" >> "$GITHUB_ENV"
 
       - name: Setup Python venv
         run: |
@@ -70,8 +72,10 @@ jobs:
           python - <<'PY'
           import pyimg4
           import capstone
+          from PIL import Image
           print("OK: pyimg4")
           print("OK: capstone")
+          print("OK: pillow")
           PY
           echo "VENV_PYTHON=$(pwd)/.venv/bin/python" >> "$GITHUB_ENV"
 
@@ -203,6 +207,7 @@ jobs:
           set -e
           source .venv/bin/activate
           export PATH="$(pwd)/.venv/bin:$PATH"
+          export DYLD_LIBRARY_PATH="$(brew --prefix libpng)/lib:${DYLD_LIBRARY_PATH:-}"
           echo "============================================"
           echo " Building iPhone XS ramdisk"
           echo "============================================"
@@ -242,7 +247,7 @@ jobs:
             [[ -f "$BOOTCHAIN_DIR/$f" ]] || { echo "MISSING: $f"; exit 1; }
             echo "OK: $f"
           done
-          [[ -f "$BOOTCHAIN_DIR/iBoot.patched.bin" ]] && echo "OK: iBoot.patched.bin" || echo "WARNING: iBoot.patched.bin is absent"
+          [[ -f "$BOOTCHAIN_DIR/iBoot.patched.bin" ]] && echo "OK: iBoot.patched.bin" || { echo "MISSING: iBoot.patched.bin"; exit 1; }
 
       - name: Package artifact
         run: |
