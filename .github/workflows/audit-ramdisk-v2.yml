@@ -1,0 +1,251 @@
+name: Audit iPhone XS A12 Ramdisk v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel:
+        description: "Kernel variant"
+        required: true
+        default: "patched"
+        type: choice
+        options:
+          - patched
+          - stock
+      with_fw:
+        description: "Include coprocessor firmware"
+        required: true
+        default: true
+        type: boolean
+      extract_dyld:
+        description: "Extract matching arm64e dyld cache"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  audit:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Host diagnostics
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -a
+          uname -m
+          arch
+          system_profiler SPHardwareDataType | sed -n '1,30p'
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          brew untap aws/tap || true
+          brew update
+          brew install ipsw curl python@3 libpng
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            python -m pip install -r requirements.txt
+          else
+            python -m pip install pyimg4 capstone pillow
+          fi
+          python - <<'PY'
+          import pyimg4, capstone
+          from PIL import Image
+          print('pyimg4=OK')
+          print('capstone=OK')
+          print('pillow=OK')
+          PY
+          echo "PATH=$(pwd)/.venv/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Patch case-insensitive BuildManifest matching
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('build.sh')
+          s = p.read_text()
+          old = 'if item.get("Info", {}).get("DeviceClass") == board'
+          new = 'if item.get("Info", {}).get("DeviceClass", "").lower() == board.lower()'
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+              print('patched BuildManifest DeviceClass comparison')
+          elif new in s:
+              print('BuildManifest DeviceClass comparison already patched')
+          else:
+              raise SystemExit('BuildManifest DeviceClass comparison pattern not found')
+          PY
+          grep -n "DeviceClass.*board" build.sh
+
+      - name: Build XS ramdisk
+        run: |
+          set -euo pipefail
+          echo "=== BUILD ==="
+          echo "Device: iPhone11,2 / D321AP / 0x8020"
+          echo "Build : 22D63 / iOS 18.3"
+          echo "Kernel: ${{ inputs.kernel }}"
+          echo "FW    : ${{ inputs.with_fw }}"
+          if [[ "${{ inputs.with_fw }}" == "true" ]]; then
+            ./build.sh --device iPhone11,2 --build 22D63 --kernel "${{ inputs.kernel }}" --with-fw
+          else
+            ./build.sh --device iPhone11,2 --build 22D63 --kernel "${{ inputs.kernel }}" --no-fw
+          fi
+
+      - name: Locate bootchain
+        run: |
+          set -euo pipefail
+          BOOTCHAIN_DIR="$(find bootchain -mindepth 1 -maxdepth 1 -type d | head -1)"
+          [[ -n "$BOOTCHAIN_DIR" ]] || { echo 'No bootchain found'; exit 1; }
+          echo "BOOTCHAIN_DIR=$BOOTCHAIN_DIR" >> "$GITHUB_ENV"
+          find "$BOOTCHAIN_DIR" -maxdepth 1 -type f -print | sort
+
+      - name: Extract and inspect built ramdisk
+        run: |
+          set -euo pipefail
+          mkdir -p audit/built audit/bininfo
+
+          tools/darwin/img4 -i "$BOOTCHAIN_DIR/ramdisk.img4" -o audit/built/ramdisk.dmg
+          file audit/built/ramdisk.dmg
+          shasum -a 256 audit/built/ramdisk.dmg
+
+          hdiutil attach -mountpoint audit/built/mnt -owners off \
+            -imagekey diskimage-class=CRawDiskImage audit/built/ramdisk.dmg
+
+          for f in sbin/launchd usr/lib/dyld usr/local/bin/restored_external usr/local/bin/dropbear usr/bin/mount_ich; do
+            if [[ -e "audit/built/mnt/$f" ]]; then
+              echo "PRESENT: $f"
+              file "audit/built/mnt/$f" || true
+            else
+              echo "MISSING: $f"
+            fi
+done
+
+          echo '=== dyld cache candidates ==='
+          find audit/built/mnt -type f \( -name 'dyld_shared_cache*' -o -name 'libSystem.B.dylib' \) -print | sort || true
+
+          echo '=== launchd dependencies ==='
+          if [[ -f audit/built/mnt/sbin/launchd ]]; then
+            otool -L audit/built/mnt/sbin/launchd | tee audit/bininfo/launchd-deps.txt
+            otool -l audit/built/mnt/sbin/launchd > audit/bininfo/launchd-loadcmds.txt
+          fi
+
+          echo '=== restored_external dependencies ==='
+          if [[ -f audit/built/mnt/usr/local/bin/restored_external ]]; then
+            file audit/built/mnt/usr/local/bin/restored_external | tee audit/bininfo/restored_external-file.txt
+            otool -L audit/built/mnt/usr/local/bin/restored_external | tee audit/bininfo/restored_external-deps.txt || true
+          fi
+
+          echo '=== all executable Mach-O files ==='
+          find audit/built/mnt -type f -print0 | while IFS= read -r -d '' f; do
+            if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
+              file "$f"
+            fi
+          done | sort > audit/bininfo/macho-files.txt || true
+
+          find audit/built/mnt -type f -print0 | sort -z | xargs -0 shasum -a 256 > audit/built/file-sha256.txt
+
+          hdiutil detach audit/built/mnt || hdiutil detach -force audit/built/mnt || true
+
+      - name: Extract stock RestoreRamDisk
+        run: |
+          set -euo pipefail
+          mkdir -p audit/stock
+          URLS="$(ipsw download ipsw --device iPhone11,2 --build 22D63 --urls 2>&1)"
+          echo "$URLS" | tee audit/stock/ipsw-urls.txt
+          IPSW_URL="$(printf '%s\n' "$URLS" | grep -Eo 'https?://[^[:space:]]+\.ipsw' | head -1)"
+          [[ -n "$IPSW_URL" ]] || { echo 'Unable to resolve IPSW URL'; exit 1; }
+          echo "IPSW_URL=$IPSW_URL" >> "$GITHUB_ENV"
+          ipsw extract --remote "$IPSW_URL" --pattern '.*RestoreRamDisk.*' --output audit/stock
+          STOCK_IM4P="$(find audit/stock -type f | grep -E 'RestoreRamDisk.*\.(im4p|img4)$' | head -1 || true)"
+          [[ -n "$STOCK_IM4P" ]] || { echo 'No stock RestoreRamDisk extracted'; find audit/stock -type f -print; exit 1; }
+          echo "STOCK_IM4P=$STOCK_IM4P" >> "$GITHUB_ENV"
+          tools/darwin/img4 -i "$STOCK_IM4P" -o audit/stock/ramdisk.dmg || ipsw img4 im4p extract -o audit/stock/ramdisk.dmg "$STOCK_IM4P"
+          file audit/stock/ramdisk.dmg
+          shasum -a 256 audit/stock/ramdisk.dmg
+
+      - name: Compare stock and built ramdisk
+        run: |
+          set -euo pipefail
+          mkdir -p audit/compare/stock audit/compare/built
+          hdiutil attach -mountpoint audit/compare/stock -owners off -imagekey diskimage-class=CRawDiskImage audit/stock/ramdisk.dmg
+          hdiutil attach -mountpoint audit/compare/built -owners off -imagekey diskimage-class=CRawDiskImage audit/built/ramdisk.dmg
+
+          find audit/compare/stock -type f -print | sed 's#^audit/compare/stock/##' | sort > audit/compare/stock-files.txt
+          find audit/compare/built -type f -print | sed 's#^audit/compare/built/##' | sort > audit/compare/built-files.txt
+          comm -3 audit/compare/stock-files.txt audit/compare/built-files.txt > audit/compare/file-set-diff.txt || true
+
+          echo '=== files added/removed ==='
+          cat audit/compare/file-set-diff.txt || true
+
+          while IFS= read -r rel; do
+            [[ -f "audit/compare/stock/$rel" && -f "audit/compare/built/$rel" ]] || continue
+            A="$(shasum -a 256 "audit/compare/stock/$rel" | awk '{print $1}')"
+            B="$(shasum -a 256 "audit/compare/built/$rel" | awk '{print $1}')"
+            [[ "$A" == "$B" ]] || printf '%s\t%s\t%s\n' "$rel" "$A" "$B"
+          done < audit/compare/stock-files.txt > audit/compare/overwritten.txt || true
+
+          echo '=== overwritten stock files ==='
+          cat audit/compare/overwritten.txt || true
+
+          echo '=== launchd stock vs built ==='
+          if [[ -f audit/compare/stock/sbin/launchd && -f audit/compare/built/sbin/launchd ]]; then
+            shasum -a 256 audit/compare/stock/sbin/launchd audit/compare/built/sbin/launchd
+            otool -L audit/compare/stock/sbin/launchd > audit/compare/stock-launchd-deps.txt
+            otool -L audit/compare/built/sbin/launchd > audit/compare/built-launchd-deps.txt
+            diff -u audit/compare/stock-launchd-deps.txt audit/compare/built-launchd-deps.txt || true
+          fi
+
+          hdiutil detach audit/compare/stock || hdiutil detach -force audit/compare/stock || true
+          hdiutil detach audit/compare/built || hdiutil detach -force audit/compare/built || true
+
+      - name: Extract matching arm64e dyld cache
+        if: ${{ inputs.extract_dyld }}
+        run: |
+          set -euo pipefail
+          mkdir -p audit/dyld
+          ipsw extract --dyld --dyld-arch arm64e --remote "$IPSW_URL" -o audit/dyld
+          CACHE="$(find audit/dyld -type f -name 'dyld_shared_cache_arm64e*' | head -1 || true)"
+          if [[ -n "$CACHE" ]]; then
+            file "$CACHE"
+            shasum -a 256 "$CACHE"
+            ipsw dyld info "$CACHE" --dylibs --sig -V | tee audit/dyld/dyld-info.txt
+            grep -Ei 'libSystem|libsystem_kernel|libsystem_platform|libsystem_malloc' audit/dyld/dyld-info.txt || true
+          else
+            echo 'WARNING: no arm64e dyld cache extracted'
+          fi
+
+      - name: Image4 and metadata audit
+        run: |
+          set -euo pipefail
+          cat "$BOOTCHAIN_DIR/chain.info"
+          echo
+          ls -lah "$BOOTCHAIN_DIR"
+          for f in iBoot.patched.bin kernelcache.img4 logo.img4 devicetree.img4 trustcache.img4 ramdisk.img4; do
+            [[ -f "$BOOTCHAIN_DIR/$f" ]] && { echo "--- $f"; file "$BOOTCHAIN_DIR/$f" || true; }
+          done
+
+      - name: Package forensic report
+        if: always()
+        run: |
+          set +e
+          mkdir -p audit
+          cat > audit/README.txt <<'EOF'
+Audit: iPhone11,2 / D321AP / A12 / iOS 18.3 / 22D63
+
+The audit compares the injected ramdisk against Apple's stock RestoreRamDisk,
+checks launchd and injected binaries, and optionally inspects the matching arm64e dyld cache.
+EOF
+          tar -czf iphone-xs-18.3-ramdisk-forensics-v2.tar.gz audit bootchain
+
+      - name: Upload forensic artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-xs-18.3-ramdisk-forensics-v2-${{ inputs.kernel }}
+          path: iphone-xs-18.3-ramdisk-forensics-v2.tar.gz
+          if-no-files-found: warn
