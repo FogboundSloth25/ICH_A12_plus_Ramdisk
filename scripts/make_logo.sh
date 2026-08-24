@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
 # Build a centered ICH boot logo on a pure-black fullscreen canvas.
-#
-# Usage:
-#   ./scripts/make_logo.sh                         # BOARD from env or default
-#   ./scripts/make_logo.sh n841ap                  # boardconfig → panel lookup
-#   ./scripts/make_logo.sh d321ap --out bootchain/.../logo.img4
-#   ./scripts/make_logo.sh icon.png 828 1792       # explicit panel
-#
-# build.sh writes logo.img4 into the device bootchain folder.
-# boot.sh prefers that file; otherwise rebuilds for the connected panel.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=../env.sh
 source "$ROOT/env.sh"
-# shellcheck source=devices.sh
 source "$ROOT/scripts/devices.sh"
 
 PNG="$NR_RESOURCES/ich_logo.png"
@@ -61,6 +50,12 @@ elif (($# >= 1)); then
     (($#)) && [[ -f "$1" || "$1" == *.png ]] && { PNG="$1"; shift; }
 fi
 
+# Build scripts pass board names from BuildManifest as uppercase DeviceClass
+# values (for example D321AP). devices.sh uses lowercase board keys.
+if [[ -n "$BOARD" ]]; then
+    BOARD="$(printf '%s' "$BOARD" | tr '[:upper:]' '[:lower:]')"
+fi
+
 if [[ -z "$WIDTH" || -z "$HEIGHT" ]]; then
     BOARD="${BOARD:-${NR_BOARD:-n841ap}}"
     panel="$(nr_panel_for_board "$BOARD")" && known=1 || known=0
@@ -78,7 +73,6 @@ IMG4="$NR_TOOLS/img4"
 IM4M="$NR_RESOURCES/IM4M_$CPID"
 [[ -f "$IM4M" ]] || IM4M="$NR_RESOURCES/IM4M_0x8020"
 
-# Scratch next to --out when set; else resources/logo_cache
 if [[ -n "$OUT_DEST" ]]; then
     CACHE="$(dirname "$OUT_DEST")/.logo_build"
 else
@@ -90,7 +84,6 @@ TAG="${TAG//\//_}"
 FULL="$CACHE/${TAG}_${WIDTH}x${HEIGHT}.png"
 RAW="$CACHE/${TAG}_${WIDTH}x${HEIGHT}.raw"
 OUT="$CACHE/${TAG}_${WIDTH}x${HEIGHT}.img4"
-
 PUB_RAW="$NR_RESOURCES/ich_logo.raw"
 PUB_OUT="$NR_RESOURCES/logo.img4"
 
@@ -103,13 +96,7 @@ echo "logo: board=${BOARD:-custom} panel=${WIDTH}x${HEIGHT} mark=${MARK} cpid=${
 python3 - "$PNG" "$FULL" "$WIDTH" "$HEIGHT" "$MARK" <<'PY'
 from pathlib import Path
 import sys
-
-try:
-    from PIL import Image
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pillow", "-q"])
-    from PIL import Image
+from PIL import Image
 
 src, out, W, H, LOGO = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 im = Image.open(src).convert("RGBA")
@@ -144,7 +131,6 @@ if [[ -n "$OUT_DEST" ]]; then
     mkdir -p "$(dirname "$OUT_DEST")"
     cp -f "$OUT" "$OUT_DEST"
     echo "wrote $OUT_DEST (centered for ${WIDTH}x${HEIGHT})"
-    # Drop scratch beside bootchain
     rm -rf "$CACHE"
 else
     cp -f "$RAW" "$PUB_RAW"
