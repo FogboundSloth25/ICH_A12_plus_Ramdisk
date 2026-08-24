@@ -16,14 +16,12 @@ EXPECTED_IMAGES = {
     "kernelcache.img4": "rkrn",
 }
 
-# n841 / iBoot-11881 remote-boot wrapper layout (XR 18.7.9 only).
 FALSE_POSITIVE_OFFSET = 0xE10
 IMAGE4_CANARY_BRANCH = 0x2C194
 IMAGE4_CALLBACK_RESULT = 0x2C198
 UPDATE_DEVICE_TREE_TRAMPOLINE = 0x2C8DC
 NOP = bytes.fromhex("1f2003d5")
 MOV_X0_ZERO = bytes.fromhex("000080d2")
-# v1.1: allow expanded RD up to ~280MiB + IMG4 overhead (was 210MiB).
 MAX_REMOTE_RAMDISK_CONTAINER_BYTES = 280 * 1024 * 1024 + 16 * 1024
 
 
@@ -109,9 +107,16 @@ def main() -> None:
     iboot = bootchain / "iBoot.patched.bin"
     if not iboot.is_file():
         fail(f"missing {iboot}")
-    if b"rd=md0" not in iboot.read_bytes():
-        fail("iBoot.patched.bin missing rd=md0")
-    print("OK: iBoot has rd=md0")
+
+    iboot_data = iboot.read_bytes()
+    # A12/A13 boot.sh programs boot-args in Recovery immediately before bootx.
+    # Some older Leeksov iBECs (including iPhone11,2 20F75) do not contain the
+    # historical baked-in "serial=3 -v debug=0x2014e %s" slot. Do not reject
+    # an otherwise valid bootchain solely because rd=md0 is absent from iBoot.
+    if b"rd=md0" in iboot_data:
+        print("OK: iBoot contains rd=md0")
+    else:
+        print("OK: iBoot has no baked-in rd=md0; boot.sh will set boot-args before bootx")
 
     if args.expected_board == "n841ap":
         validate_n841_iboot(iboot, args.stock_iboot)
