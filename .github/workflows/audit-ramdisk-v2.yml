@@ -108,14 +108,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p audit/built audit/bininfo
-
           tools/darwin/img4 -i "$BOOTCHAIN_DIR/ramdisk.img4" -o audit/built/ramdisk.dmg
           file audit/built/ramdisk.dmg
           shasum -a 256 audit/built/ramdisk.dmg
-
+          mkdir -p audit/built/mnt
           hdiutil attach -mountpoint audit/built/mnt -owners off \
             -imagekey diskimage-class=CRawDiskImage audit/built/ramdisk.dmg
-
           for f in sbin/launchd usr/lib/dyld usr/local/bin/restored_external usr/local/bin/dropbear usr/bin/mount_ich; do
             if [[ -e "audit/built/mnt/$f" ]]; then
               echo "PRESENT: $f"
@@ -123,32 +121,26 @@ jobs:
             else
               echo "MISSING: $f"
             fi
-done
-
+          done
           echo '=== dyld cache candidates ==='
           find audit/built/mnt -type f \( -name 'dyld_shared_cache*' -o -name 'libSystem.B.dylib' \) -print | sort || true
-
           echo '=== launchd dependencies ==='
           if [[ -f audit/built/mnt/sbin/launchd ]]; then
             otool -L audit/built/mnt/sbin/launchd | tee audit/bininfo/launchd-deps.txt
             otool -l audit/built/mnt/sbin/launchd > audit/bininfo/launchd-loadcmds.txt
           fi
-
           echo '=== restored_external dependencies ==='
           if [[ -f audit/built/mnt/usr/local/bin/restored_external ]]; then
             file audit/built/mnt/usr/local/bin/restored_external | tee audit/bininfo/restored_external-file.txt
             otool -L audit/built/mnt/usr/local/bin/restored_external | tee audit/bininfo/restored_external-deps.txt || true
           fi
-
           echo '=== all executable Mach-O files ==='
           find audit/built/mnt -type f -print0 | while IFS= read -r -d '' f; do
             if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
               file "$f"
             fi
           done | sort > audit/bininfo/macho-files.txt || true
-
           find audit/built/mnt -type f -print0 | sort -z | xargs -0 shasum -a 256 > audit/built/file-sha256.txt
-
           hdiutil detach audit/built/mnt || hdiutil detach -force audit/built/mnt || true
 
       - name: Extract stock RestoreRamDisk
@@ -174,24 +166,19 @@ done
           mkdir -p audit/compare/stock audit/compare/built
           hdiutil attach -mountpoint audit/compare/stock -owners off -imagekey diskimage-class=CRawDiskImage audit/stock/ramdisk.dmg
           hdiutil attach -mountpoint audit/compare/built -owners off -imagekey diskimage-class=CRawDiskImage audit/built/ramdisk.dmg
-
           find audit/compare/stock -type f -print | sed 's#^audit/compare/stock/##' | sort > audit/compare/stock-files.txt
           find audit/compare/built -type f -print | sed 's#^audit/compare/built/##' | sort > audit/compare/built-files.txt
           comm -3 audit/compare/stock-files.txt audit/compare/built-files.txt > audit/compare/file-set-diff.txt || true
-
           echo '=== files added/removed ==='
           cat audit/compare/file-set-diff.txt || true
-
           while IFS= read -r rel; do
             [[ -f "audit/compare/stock/$rel" && -f "audit/compare/built/$rel" ]] || continue
             A="$(shasum -a 256 "audit/compare/stock/$rel" | awk '{print $1}')"
             B="$(shasum -a 256 "audit/compare/built/$rel" | awk '{print $1}')"
             [[ "$A" == "$B" ]] || printf '%s\t%s\t%s\n' "$rel" "$A" "$B"
           done < audit/compare/stock-files.txt > audit/compare/overwritten.txt || true
-
           echo '=== overwritten stock files ==='
           cat audit/compare/overwritten.txt || true
-
           echo '=== launchd stock vs built ==='
           if [[ -f audit/compare/stock/sbin/launchd && -f audit/compare/built/sbin/launchd ]]; then
             shasum -a 256 audit/compare/stock/sbin/launchd audit/compare/built/sbin/launchd
@@ -199,7 +186,6 @@ done
             otool -L audit/compare/built/sbin/launchd > audit/compare/built-launchd-deps.txt
             diff -u audit/compare/stock-launchd-deps.txt audit/compare/built-launchd-deps.txt || true
           fi
-
           hdiutil detach audit/compare/stock || hdiutil detach -force audit/compare/stock || true
           hdiutil detach audit/compare/built || hdiutil detach -force audit/compare/built || true
 
@@ -226,7 +212,10 @@ done
           echo
           ls -lah "$BOOTCHAIN_DIR"
           for f in iBoot.patched.bin kernelcache.img4 logo.img4 devicetree.img4 trustcache.img4 ramdisk.img4; do
-            [[ -f "$BOOTCHAIN_DIR/$f" ]] && { echo "--- $f"; file "$BOOTCHAIN_DIR/$f" || true; }
+            if [[ -f "$BOOTCHAIN_DIR/$f" ]]; then
+              echo "--- $f"
+              file "$BOOTCHAIN_DIR/$f" || true
+            fi
           done
 
       - name: Package forensic report
