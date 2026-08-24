@@ -1,0 +1,226 @@
+name: Build iPhone XS A12 Ramdisk - iOS 18.3 Diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel:
+        description: "Kernel mode"
+        required: true
+        default: stock
+        type: choice
+        options:
+          - stock
+          - patched
+      with_fw:
+        description: "Include coprocessor firmware"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rosetta and x86_64 libpng
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          softwareupdate --install-rosetta --agree-to-license || true
+
+          if [[ ! -x /usr/local/bin/brew ]]; then
+            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" -- --prefix=/usr/local
+          fi
+
+          arch -x86_64 /usr/local/bin/brew update
+          arch -x86_64 /usr/local/bin/brew install libpng
+
+          X86_BREW="$(arch -x86_64 /usr/local/bin/brew --prefix)"
+          X86_LIBPNG="$(arch -x86_64 /usr/local/bin/brew --prefix libpng)"
+
+          echo "X86_BREW=$X86_BREW" >> "$GITHUB_ENV"
+          echo "X86_LIBPNG=$X86_LIBPNG" >> "$GITHUB_ENV"
+
+          echo "arm64 Homebrew: $(brew --prefix)"
+          echo "x86_64 Homebrew: $X86_BREW"
+          echo "x86_64 libpng:   $X86_LIBPNG"
+          file /usr/local/bin/brew || true
+          file "$X86_LIBPNG/lib/libpng16.16.dylib" || true
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install ipsw curl python@3 libpng
+          python3 --version
+          ipsw version || true
+
+      - name: Setup Python environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            python -m pip install -r requirements.txt
+          else
+            python -m pip install pyimg4 capstone pillow
+          fi
+          python - <<'PY'
+          import pyimg4, capstone
+          from PIL import Image
+          print("pyimg4 OK")
+          print("capstone OK")
+          print("Pillow OK")
+          PY
+
+      - name: Verify A12 resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in \
+            build.sh env.sh scripts/devices.sh scripts/ramdisk_expand.sh \
+            patch/iboot_patchfinder.py patch/apply_kernel_patches.py \
+            patch/finalize_iboot.py patch/preflight.py
+          do
+            [[ -f "$f" ]] || { echo "MISSING: $f"; exit 1; }
+          done
+
+          for f in resources/IM4M_0x8020 resources/ssh.tar.gz resources/sshtarlist.txt; do
+            [[ -f "$f" ]] || { echo "MISSING: $f"; exit 1; }
+          done
+
+          chmod +x tools/darwin/*
+
+          for f in pzb img4 gtar trustcache jq irecovery ibootim; do
+            [[ -x "tools/darwin/$f" ]] || { echo "MISSING: tools/darwin/$f"; exit 1; }
+          done
+
+          echo "Custom logo file:"
+          if [[ -f resources/ich_logo.png ]]; then
+            file resources/ich_logo.png
+            echo "Using resources/ich_logo.png"
+          else
+            echo "NOT PRESENT - build will skip custom logo"
+          fi
+
+      - name: Make ibootim run under Rosetta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mv tools/darwin/ibootim tools/darwin/ibootim.real
+
+          cat > tools/darwin/ibootim <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          export DYLD_LIBRARY_PATH="${X86_LIBPNG}/lib:${DYLD_LIBRARY_PATH:-}"
+          exec /usr/bin/arch -x86_64 "$ROOT_DIR/ibootim.real" "$@"
+          SH
+
+          chmod +x tools/darwin/ibootim
+
+          echo "ibootim architecture:"
+          file tools/darwin/ibootim.real
+          echo "x86_64 libpng: $X86_LIBPNG"
+          otool -L tools/darwin/ibootim.real | grep -i png || true
+
+      - name: Build iPhone XS A12 ramdisk
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+          export PATH="$(pwd)/.venv/bin:$PATH"
+          export DYLD_LIBRARY_PATH="$X86_LIBPNG/lib:${DYLD_LIBRARY_PATH:-}"
+
+          echo "============================================"
+          echo " iPhone XS / iPhone11,2 / iOS 18.3"
+          echo "============================================"
+          echo "ProductType : iPhone11,2"
+          echo "BoardConfig : D321AP"
+          echo "Platform    : t8020"
+          echo "CPID        : 0x8020"
+          echo "Build       : 22D63"
+          echo "Kernel      : ${{ github.event.inputs.kernel }}"
+          echo "With FW     : ${{ github.event.inputs.with_fw }}"
+          echo
+
+          ARGS=(
+            --device iPhone11,2
+            --build 22D63
+            --kernel "${{ github.event.inputs.kernel }}"
+          )
+
+          if [[ "${{ github.event.inputs.with_fw }}" == "true" ]]; then
+            ARGS+=(--with-fw)
+          else
+            ARGS+=(--no-fw)
+          fi
+
+          ./build.sh "${ARGS[@]}"
+
+      - name: Inspect bootchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          BOOTCHAIN_DIR="$(find bootchain -mindepth 1 -maxdepth 1 -type d | head -1)"
+          [[ -n "$BOOTCHAIN_DIR" ]] || { echo "No bootchain directory"; exit 1; }
+
+          echo "=== chain.info ==="
+          cat "$BOOTCHAIN_DIR/chain.info"
+
+          echo
+          echo "=== files ==="
+          find "$BOOTCHAIN_DIR" -maxdepth 1 -type f -print -exec ls -lh {} \;
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          BOOTCHAIN_DIR="$(find bootchain -mindepth 1 -maxdepth 1 -type d | head -1)"
+          [[ -n "$BOOTCHAIN_DIR" ]] || exit 1
+
+          mkdir -p artifact/bootchain
+          cp -a "$BOOTCHAIN_DIR"/. artifact/bootchain/
+
+          cat > artifact/BUILD-INFO.txt <<EOF
+          Device: iPhone XS
+          ProductType: iPhone11,2
+          BoardConfig: D321AP
+          Platform: t8020
+          CPID: 0x8020
+          iOS: 18.3
+          Build: 22D63
+          Kernel: ${{ github.event.inputs.kernel }}
+          With-FW: ${{ github.event.inputs.with_fw }}
+          Custom-logo: $([[ -f resources/ich_logo.png ]] && echo yes || echo no)
+          Runner: macos-15
+          Commit: ${{ github.sha }}
+          Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+          tar -czf "iphone-xs-a12-18.3-${{ github.event.inputs.kernel }}.tar.gz" -C artifact .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-xs-a12-iOS-18.3-${{ github.event.inputs.kernel }}
+          path: |
+            artifact/
+            iphone-xs-a12-18.3-${{ github.event.inputs.kernel }}.tar.gz
+          if-no-files-found: error
+
+      - name: Restore ibootim
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          [[ -f tools/darwin/ibootim.real ]] && mv -f tools/darwin/ibootim.real tools/darwin/ibootim
