@@ -6,7 +6,7 @@ on:
       ios_version:
         description: "iOS version or Build ID"
         required: true
-        default: "20F75"
+        default: "22D63"
         type: string
       kernel:
         description: "Kernel patch mode"
@@ -35,7 +35,7 @@ jobs:
         run: |
           set -e
           echo "============================================"
-          echo " iPhone XS / iPhone11,2 Ramdisk Builder"
+          echo " iPhone XS / iPhone11,2 A12 Ramdisk Builder"
           echo "============================================"
           sw_vers
           uname -m
@@ -44,7 +44,7 @@ jobs:
           echo "BoardConfig : D321AP"
           echo "Platform    : t8020"
           echo "CPID        : 0x8020"
-          echo "iOS         : ${{ github.event.inputs.ios_version }}"
+          echo "iOS / Build : ${{ github.event.inputs.ios_version }}"
 
       - name: Install system dependencies
         run: |
@@ -170,9 +170,9 @@ jobs:
           chmod +x tools/darwin/irecovery
           tools/darwin/irecovery -q
 
-      - name: Inspect iOS 16.5.1 BuildManifest
+      - name: Inspect iOS 18.3 BuildManifest
         run: |
-          set +e
+          set -e
           source .venv/bin/activate
           mkdir -p /tmp/buildmanifest
           cd /tmp/buildmanifest
@@ -181,11 +181,12 @@ jobs:
             --build "${{ github.event.inputs.ios_version }}" \
             --build-manifest \
             --output .
-          if [[ -f BuildManifest.plist ]]; then
-            python3 <<'PY'
+          [[ -f BuildManifest.plist ]] || { echo "ERROR: BuildManifest.plist was not downloaded"; exit 1; }
+          python3 <<'PY'
           import plistlib
           from pathlib import Path
           data = plistlib.loads(Path("BuildManifest.plist").read_bytes())
+          found = False
           for i, identity in enumerate(data.get("BuildIdentities", [])):
               info = identity.get("Info", {})
               print(
@@ -196,10 +197,10 @@ jobs:
                   f"BuildNumber={info.get('BuildNumber', 'N/A')} "
                   f"RestoreBehavior={info.get('RestoreBehavior', 'N/A')}"
               )
+              if info.get("DeviceClass", "").lower() == "d321ap" and info.get("BuildNumber") == "22D63":
+                  found = True
+          raise SystemExit(0 if found else "No D321AP / 22D63 BuildIdentity found")
           PY
-          else
-            echo "WARNING: BuildManifest.plist was not downloaded"
-          fi
           cd -
 
       - name: Build iPhone XS A12 ramdisk
@@ -216,6 +217,7 @@ jobs:
           echo "BoardConfig : D321AP"
           echo "Platform    : t8020"
           echo "CPID        : 0x8020"
+          echo "iOS         : 18.3"
           echo "Build       : ${{ github.event.inputs.ios_version }}"
           echo "Kernel      : ${{ github.event.inputs.kernel }}"
           echo "With FW     : ${{ github.event.inputs.with_fw }}"
@@ -247,7 +249,8 @@ jobs:
             [[ -f "$BOOTCHAIN_DIR/$f" ]] || { echo "MISSING: $f"; exit 1; }
             echo "OK: $f"
           done
-          [[ -f "$BOOTCHAIN_DIR/iBoot.patched.bin" ]] && echo "OK: iBoot.patched.bin" || { echo "MISSING: iBoot.patched.bin"; exit 1; }
+          [[ -f "$BOOTCHAIN_DIR/iBoot.patched.bin" ]] || { echo "MISSING: iBoot.patched.bin"; exit 1; }
+          echo "OK: iBoot.patched.bin"
 
       - name: Package artifact
         run: |
@@ -264,6 +267,7 @@ jobs:
           BoardConfig: D321AP
           Platform: t8020
           CPID: 0x8020
+          iOS: 18.3
           Build: ${{ github.event.inputs.ios_version }}
           Kernel: ${{ github.event.inputs.kernel }}
           With-FW: ${{ github.event.inputs.with_fw }}
@@ -273,17 +277,17 @@ jobs:
           Commit: ${{ github.sha }}
           EOF
           echo "${{ github.sha }}" > artifact/source-commit.txt
-          tar -czf iphone-xs-a12-ramdisk.tar.gz -C artifact .
+          tar -czf iphone-xs-a12-ramdisk-18.3.tar.gz -C artifact .
           find artifact -type f
-          du -ah artifact iphone-xs-a12-ramdisk.tar.gz
+          du -ah artifact iphone-xs-a12-ramdisk-18.3.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iphone-xs-a12-ramdisk-${{ github.event.inputs.ios_version }}
+          name: iphone-xs-a12-ramdisk-iOS-18.3-${{ github.event.inputs.ios_version }}
           path: |
             artifact/
-            iphone-xs-a12-ramdisk.tar.gz
+            iphone-xs-a12-ramdisk-18.3.tar.gz
           if-no-files-found: error
 
       - name: Restore original files
